@@ -5,11 +5,12 @@
 package oauth2_test
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
+
+	"golang.org/x/net/context"
 
 	"github.com/zhirsch/oauth2"
 )

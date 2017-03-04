@@ -8,11 +8,9 @@
 package oauth2 // import "github.com/zhirsch/oauth2"
 
 import (
-	"bytes"
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 
 	"golang.org/x/net/context"
@@ -60,6 +58,11 @@ type Config struct {
 
 	// Scope specifies optional requested permissions.
 	Scopes []string
+
+	// Exchanger specifies how to get tokens from the OAuth provider.  This
+	// field is optional, the default implementation should work for any
+	// provider that conforms to the OAuth2 standard.
+	Exchanger Exchanger
 }
 
 // A TokenSource is anything that can return a token.
@@ -73,8 +76,9 @@ type TokenSource interface {
 // Endpoint contains the OAuth 2.0 provider's authorization and token
 // endpoint URLs.
 type Endpoint struct {
-	AuthURL  string
-	TokenURL string
+	AuthURL    string
+	TokenURL   string
+	RefreshURL string
 }
 
 var (
@@ -124,25 +128,7 @@ func SetAuthURLParam(key, value string) AuthCodeOption {
 // Opts may include AccessTypeOnline or AccessTypeOffline, as well
 // as ApprovalForce.
 func (c *Config) AuthCodeURL(state string, opts ...AuthCodeOption) string {
-	var buf bytes.Buffer
-	buf.WriteString(c.Endpoint.AuthURL)
-	v := url.Values{
-		"response_type": {"code"},
-		"client_id":     {c.ClientID},
-		"redirect_uri":  internal.CondVal(c.RedirectURL),
-		"scope":         internal.CondVal(strings.Join(c.Scopes, " ")),
-		"state":         internal.CondVal(state),
-	}
-	for _, opt := range opts {
-		opt.setValue(v)
-	}
-	if strings.Contains(c.Endpoint.AuthURL, "?") {
-		buf.WriteByte('&')
-	} else {
-		buf.WriteByte('?')
-	}
-	buf.WriteString(v.Encode())
-	return buf.String()
+	return c.getExchanger().AuthCodeURL(c, state, opts...)
 }
 
 // PasswordCredentialsToken converts a resource owner username and password
@@ -157,12 +143,7 @@ func (c *Config) AuthCodeURL(state string, opts ...AuthCodeOption) string {
 // The HTTP client to use is derived from the context.
 // If nil, http.DefaultClient is used.
 func (c *Config) PasswordCredentialsToken(ctx context.Context, username, password string) (*Token, error) {
-	return retrieveToken(ctx, c, url.Values{
-		"grant_type": {"password"},
-		"username":   {username},
-		"password":   {password},
-		"scope":      internal.CondVal(strings.Join(c.Scopes, " ")),
-	})
+	return c.getExchanger().RetrieveTokenWithPasswordCredentials(ctx, c, username, password)
 }
 
 // Exchange converts an authorization code into a token.
@@ -176,11 +157,7 @@ func (c *Config) PasswordCredentialsToken(ctx context.Context, username, passwor
 // The code will be in the *http.Request.FormValue("code"). Before
 // calling Exchange, be sure to validate FormValue("state").
 func (c *Config) Exchange(ctx context.Context, code string) (*Token, error) {
-	return retrieveToken(ctx, c, url.Values{
-		"grant_type":   {"authorization_code"},
-		"code":         {code},
-		"redirect_uri": internal.CondVal(c.RedirectURL),
-	})
+	return c.getExchanger().RetrieveToken(ctx, c, code)
 }
 
 // Client returns an HTTP client using the provided token.
@@ -226,10 +203,7 @@ func (tf *tokenRefresher) Token() (*Token, error) {
 		return nil, errors.New("oauth2: token expired and refresh token is not set")
 	}
 
-	tk, err := retrieveToken(tf.ctx, tf.conf, url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {tf.refreshToken},
-	})
+	tk, err := tf.conf.getExchanger().RefreshToken(tf.ctx, tf.conf, tf.refreshToken)
 
 	if err != nil {
 		return nil, err
@@ -337,4 +311,11 @@ func ReuseTokenSource(t *Token, src TokenSource) TokenSource {
 		t:   t,
 		new: src,
 	}
+}
+
+func (c *Config) getExchanger() Exchanger {
+	if c.Exchanger == nil {
+		c.Exchanger = &defaultExchanger{}
+	}
+	return c.Exchanger
 }
